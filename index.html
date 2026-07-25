@@ -1,0 +1,2067 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="C.A.T. PDA">
+<meta name="theme-color" content="#000000">
+<meta name="format-detection" content="telephone=no,date=no,address=no,email=no">
+<title>C.A.T. Personal Data Assistant</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<style>
+/* ============================================================
+   C.A.T. PERSONAL DATA ASSISTANT
+   JOUST ELECTRONICS - unit firmware
+   ------------------------------------------------------------
+   Layout contract (do not regress - see ios-navbar-fix):
+     html  : explicit height, no scroll  (else body clips at ICB)
+     body  : position:fixed inset:0, flex column, no height units
+     #stage: flex:1 1 auto, min-height:0  (the only scroll parent
+             is #main, inside the unit)
+     footer: flex item at the end of the unit, never fixed/absolute
+   All interior sizing is in --u ("logical unit"), set by JS from
+   the measured unit width against a 360-wide design grid.
+   ============================================================ */
+
+:root{
+  /* Monochrome. The reference screenshots are the unit projected
+     onto an olive wall at a save station; the panel itself is
+     white on true black, which is also what an AMOLED phone wants. */
+  --c-lite:#ffffff;   /* light band / lit segment          */
+  --c-lite-d:#cfcfcf; /* light band, pressed               */
+  --c-mid:#8a8a8a;    /* half tone: rules, low priority    */
+  --c-olive:#000000;  /* dark band / panel base            */
+  --c-olive-d:#0b0b0b;
+  --c-deep:#000000;
+  --c-ink:#000000;    /* text on light                     */
+  --c-ink-2:#5a5a5a;  /* secondary text on light           */
+  --c-void:#000000;   /* outside the screen                */
+  --c-glow:#ffffff;
+  --u:1px;
+  --band:calc(var(--u)*25);   /* the stripe rhythm         */
+  --gut:calc(var(--u)*10);
+  --bl:1;                     /* backlight multiplier      */
+}
+
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+
+html{height:100%;overflow:hidden;-webkit-text-size-adjust:100%}
+
+body{
+  position:fixed;inset:0;overflow:hidden;
+  display:flex;flex-direction:column;
+  background:var(--c-void);
+  color:var(--c-ink);
+  font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;
+  font-size:16px;line-height:1.25;
+  overscroll-behavior:none;
+  touch-action:manipulation;
+  user-select:none;-webkit-user-select:none;
+}
+input,textarea{user-select:text;-webkit-user-select:text}
+
+/* --- outer surround ------------------------------------------------ */
+#stage{
+  flex:1 1 auto;min-height:0;
+  display:flex;align-items:center;justify-content:center;
+  padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  background:#000;
+}
+/* in the standalone-viewport bug state the bottom inset reports 0 */
+body.vfix #stage{padding-bottom:max(env(safe-area-inset-bottom),24px)}
+
+/* --- the unit ------------------------------------------------------ */
+#pda{
+  position:relative;flex:0 0 auto;
+  display:flex;flex-direction:column;
+  overflow:hidden;
+  background:var(--c-olive);
+  filter:brightness(var(--bl));
+  /* black panel on a black surround: a hairline keeps the unit
+     readable as an object in SQUARE mode without adding colour */
+  outline:1px solid rgba(255,255,255,.10);
+}
+#pda.booting > .chrome{visibility:hidden}
+
+/* spiral binding across the top */
+#binding{
+  flex:0 0 auto;height:calc(var(--u)*15);
+  background:var(--c-lite);
+  border-bottom:calc(var(--u)*2) solid var(--c-ink);
+  position:relative;overflow:hidden;
+}
+#binding::before{
+  content:"";position:absolute;inset:calc(var(--u)*2) 0 0;
+  background:repeating-linear-gradient(72deg,
+    var(--c-ink) 0 calc(var(--u)*3),
+    transparent calc(var(--u)*3) calc(var(--u)*9));
+}
+#binding::after{ /* the rod */
+  content:"";position:absolute;left:0;right:0;top:calc(var(--u)*5);
+  height:calc(var(--u)*3);background:var(--c-lite-d);
+  box-shadow:0 calc(var(--u)*1) 0 rgba(0,0,0,.25) inset;
+}
+
+/* title bar */
+#head{
+  flex:0 0 auto;
+  background:var(--c-lite);
+  border-bottom:calc(var(--u)*2) solid var(--c-ink);
+  display:flex;align-items:center;gap:var(--gut);
+  padding:calc(var(--u)*4) var(--gut);
+  min-height:calc(var(--u)*22);
+}
+#head .ttl{flex:1 1 auto;display:flex;justify-content:center;overflow:hidden}
+#back,#head .hbtn{
+  flex:0 0 auto;width:calc(var(--u)*22);height:calc(var(--u)*16);
+  display:flex;align-items:center;justify-content:center;
+  background:transparent;border:0;cursor:pointer;
+}
+#back[hidden],#head .hbtn[hidden]{display:none}
+#back:active,#head .hbtn:active{opacity:.45}
+
+/* --- scroller ------------------------------------------------------ */
+#main{
+  flex:1 1 auto;min-height:0;
+  overflow-y:auto;overflow-x:hidden;
+  -webkit-overflow-scrolling:touch;
+  overscroll-behavior:contain;
+  position:relative;
+}
+/* The home stripes are real elements (see .band), not a repeating
+   backdrop - a backdrop tiles forever and leaves empty light bars
+   under the last row in FIT mode. Content screens keep a faint
+   version as texture only. */
+#main.free{
+  background-image:repeating-linear-gradient(
+     to bottom,
+     rgba(255,255,255,.07) 0 var(--band),
+     transparent var(--band) calc(var(--band)*2));
+  background-attachment:local;
+}
+#sheet{min-height:100%;display:flex;flex-direction:column}
+
+/* --- footer: SAVE DATA + colophon ---------------------------------- */
+#foot{
+  flex:0 0 auto;
+  background:var(--c-lite);
+  border-top:calc(var(--u)*2) solid var(--c-ink);
+  padding:calc(var(--u)*5) var(--gut) calc(var(--u)*4);
+}
+/* the SAVE DATA panel belongs to the menu screen only - elsewhere
+   it is just eating a sixth of the panel */
+#foot[hidden]{display:none}
+#save{
+  display:flex;align-items:stretch;gap:calc(var(--u)*6);
+  border:calc(var(--u)*2) solid var(--c-ink);
+  padding:calc(var(--u)*4);
+  background:var(--c-lite);
+}
+#saveBtn{
+  flex:0 0 auto;width:40%;min-width:0;
+  display:flex;flex-direction:column;justify-content:center;gap:calc(var(--u)*3);
+  background:transparent;border:0;padding:0;text-align:left;cursor:pointer;
+}
+#saveBtn:active{opacity:.5}
+#lampRow{display:flex;align-items:center;gap:calc(var(--u)*4);min-width:0}
+#saveSub{display:flex;flex-direction:column;gap:calc(var(--u)*2);min-width:0}
+#saveBtn .lamp{
+  flex:0 0 auto;
+  width:calc(var(--u)*9);height:calc(var(--u)*9);
+  border:calc(var(--u)*2) solid var(--c-ink);background:var(--c-lite);
+}
+#saveBtn.on .lamp{background:var(--c-ink)}
+#saveRow{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:calc(var(--u)*3);justify-content:center}
+.sfield{
+  display:flex;align-items:center;gap:calc(var(--u)*4);
+  border:calc(var(--u)*1) solid var(--c-ink);
+  padding:calc(var(--u)*2) calc(var(--u)*3);
+}
+.sfield > span{flex:1 1 0;display:flex;align-items:center;gap:calc(var(--u)*3)}
+.sfield i{
+  flex:0 0 auto;display:block;
+  width:calc(var(--u)*3);height:calc(var(--u)*8);background:var(--c-ink);
+}
+#colophon{
+  display:flex;align-items:flex-end;justify-content:space-between;gap:var(--gut);
+  padding-top:calc(var(--u)*4);
+}
+#colophon .lines{display:flex;flex-direction:column;gap:calc(var(--u)*2);min-width:0;flex:1 1 auto}
+#logo{flex:0 0 auto}
+/* the panel has no visible scrollbar - it is a projected display */
+#main::-webkit-scrollbar{width:0;height:0;display:none}
+#main{scrollbar-width:none}
+
+/* --- pixel text ---------------------------------------------------- */
+/* max-width is a safety net: a string that overruns its column is
+   scaled down rather than punching out of the panel. */
+.bmp{display:block;image-rendering:pixelated;image-rendering:crisp-edges;
+     max-width:100%;height:auto}
+
+/* --- home bands ---------------------------------------------------- */
+.menu{display:flex;flex-direction:column}
+.band{flex:0 0 auto;height:var(--band)}
+.band.lit{background:var(--c-lite)}
+.band.gaplabel{display:flex;align-items:center;padding:0 var(--gut)}
+.mrow{
+  position:relative;
+  display:flex;align-items:center;gap:var(--gut);
+  padding:0 var(--gut);
+  border:0;width:100%;cursor:pointer;text-align:left;
+}
+.mrow::after{content:"";position:absolute;left:0;right:0;
+  top:calc(var(--u)*-9);bottom:calc(var(--u)*-9)}  /* touch target */
+.mrow:active{background:var(--c-lite-d)}
+.mrow .bullet{
+  flex:0 0 auto;width:calc(var(--u)*9);height:calc(var(--u)*13);
+  background:var(--c-ink);
+}
+.mrow .cnt{margin-left:auto;display:flex;align-items:center;gap:calc(var(--u)*5)}
+/* priority-queue rows: hollow marker, filled once overdue */
+.mrow .dot{
+  flex:0 0 auto;width:calc(var(--u)*9);height:calc(var(--u)*13);
+  border:calc(var(--u)*2) solid var(--c-ink);background:transparent;
+}
+.mrow .dot.hot{background:var(--c-ink)}
+.mrow .when{margin-left:auto;flex:0 0 auto;display:flex;align-items:center}
+
+/* generic content rows on the "free" screens */
+.pad{padding:var(--gut)}
+.stack{display:flex;flex-direction:column;gap:calc(var(--u)*7)}
+.card{
+  background:var(--c-lite);
+  border:calc(var(--u)*2) solid var(--c-ink);
+  padding:calc(var(--u)*7) calc(var(--u)*8);
+}
+button.card{width:100%;text-align:left;cursor:pointer;display:block}
+button.card:active,.tap:active{background:var(--c-lite-d)}
+.card.dim{background:var(--c-mid,#b9c2a4)}
+.card.flat{border-width:calc(var(--u)*1)}
+
+.trow{display:flex;align-items:flex-start;gap:calc(var(--u)*8)}
+.tick{
+  flex:0 0 auto;position:relative;
+  width:calc(var(--u)*17);height:calc(var(--u)*17);
+  border:calc(var(--u)*2) solid var(--c-ink);
+  background:transparent;cursor:pointer;padding:0;
+}
+.tick::after{content:"";position:absolute;inset:calc(var(--u)*-8)}
+.tick.on{background:var(--c-ink)}
+.tick.on::before{
+  content:"";position:absolute;left:calc(var(--u)*2);top:calc(var(--u)*5);
+  width:calc(var(--u)*9);height:calc(var(--u)*4);
+  border-left:calc(var(--u)*2) solid var(--c-lite);
+  border-bottom:calc(var(--u)*2) solid var(--c-lite);
+  transform:rotate(-45deg);
+}
+.tbody{flex:1 1 auto;min-width:0}
+.ttl2{
+  font-size:calc(var(--u)*14);line-height:1.28;font-weight:600;
+  letter-spacing:.01em;color:var(--c-ink);
+  overflow-wrap:anywhere;
+}
+.ttl2.done{text-decoration:line-through;opacity:.5}
+.meta{display:flex;flex-wrap:wrap;align-items:center;gap:calc(var(--u)*5);margin-top:calc(var(--u)*4)}
+.chip{
+  display:inline-flex;align-items:center;gap:calc(var(--u)*3);
+  border:calc(var(--u)*1) solid var(--c-ink);
+  padding:calc(var(--u)*1) calc(var(--u)*4);
+}
+.chip.solid{background:var(--c-ink)}
+.chip.warn{background:var(--c-ink);}
+.note{font-size:calc(var(--u)*11);line-height:1.35;color:var(--c-ink-2);margin-top:calc(var(--u)*4);overflow-wrap:anywhere;white-space:pre-wrap}
+
+/* priority notches on the left edge of a card */
+.card.p1{box-shadow:inset calc(var(--u)*5) 0 0 var(--c-mid)}
+.card.p2{box-shadow:inset calc(var(--u)*5) 0 0 var(--c-ink)}
+
+/* section heading sitting on the olive */
+.sect{display:flex;align-items:center;gap:calc(var(--u)*6);padding:calc(var(--u)*4) 0 calc(var(--u)*1)}
+.sect .rule{flex:1 1 auto;height:calc(var(--u)*2);background:var(--c-lite);opacity:.5}
+
+/* --- form controls -------------------------------------------------- */
+label.fld{display:flex;flex-direction:column;gap:calc(var(--u)*4)}
+.inp{
+  width:100%;display:block;
+  font-family:inherit;font-size:calc(var(--u)*14);line-height:1.3;
+  color:var(--c-ink);background:var(--c-lite);
+  border:calc(var(--u)*2) solid var(--c-ink);
+  padding:calc(var(--u)*6) calc(var(--u)*7);
+  border-radius:0;-webkit-appearance:none;appearance:none;
+  min-height:calc(var(--u)*30);
+}
+.inp:focus{outline:calc(var(--u)*2) solid var(--c-ink);outline-offset:calc(var(--u)*2)}
+textarea.inp{min-height:calc(var(--u)*74);resize:none}
+select.inp{background-image:none}
+.seg{display:flex;border:calc(var(--u)*2) solid var(--c-ink);overflow:hidden}
+.seg button{
+  flex:1 1 0;background:var(--c-lite);border:0;cursor:pointer;
+  padding:calc(var(--u)*6) calc(var(--u)*2);
+  display:flex;align-items:center;justify-content:center;
+  border-right:calc(var(--u)*1) solid var(--c-ink);
+}
+.seg button:last-child{border-right:0}
+.seg button.on{background:var(--c-ink)}
+.row2{display:flex;gap:calc(var(--u)*7)}
+.row2 > *{flex:1 1 0;min-width:0}
+
+/* a subtask line: tick, growing field, fixed delete key.
+   button.card is width:100% by default, so both the field and the
+   key need their flex sizing stated explicitly here. */
+.steprow{display:flex;align-items:center;gap:calc(var(--u)*6)}
+.steprow > .inp{flex:1 1 auto;min-width:0;width:auto}
+.steprow > .del{flex:0 0 auto;width:auto;
+  padding:calc(var(--u)*7) calc(var(--u)*10);
+  display:flex;align-items:center;justify-content:center}
+
+/* --- overlays ------------------------------------------------------- */
+#boot{position:absolute;inset:0;z-index:20;background:#000}
+#bootc{width:100%;height:100%;display:block;image-rendering:pixelated}
+#boot.gone{opacity:0;transition:opacity .28s linear;pointer-events:none}
+
+#scan{
+  position:absolute;inset:0;z-index:30;pointer-events:none;
+  background:repeating-linear-gradient(to bottom,
+    rgba(0,0,0,.16) 0 1px, rgba(0,0,0,0) 1px 3px);
+  mix-blend-mode:multiply;opacity:.55;
+}
+#vig{
+  position:absolute;inset:0;z-index:31;pointer-events:none;
+  background:radial-gradient(118% 92% at 50% 48%,
+     rgba(0,0,0,0) 62%, rgba(0,0,0,.14) 88%, rgba(0,0,0,.28) 100%);
+}
+body.noscan #scan,body.noscan #vig{display:none}
+
+#toast{
+  position:absolute;left:50%;bottom:calc(var(--u)*16);transform:translateX(-50%);
+  z-index:40;pointer-events:none;
+  background:var(--c-ink);padding:calc(var(--u)*6) calc(var(--u)*10);
+  opacity:0;transition:opacity .18s linear;max-width:86%;
+}
+#toast.on{opacity:1}
+
+#modal{
+  position:absolute;inset:0;z-index:35;display:none;
+  align-items:center;justify-content:center;padding:var(--gut);
+  background:rgba(10,13,7,.72);
+}
+#modal.on{display:flex}
+#modalBox{
+  width:100%;max-width:calc(var(--u)*300);
+  background:var(--c-lite);border:calc(var(--u)*3) solid var(--c-ink);
+  padding:calc(var(--u)*10);display:flex;flex-direction:column;gap:calc(var(--u)*9);
+}
+
+.empty{display:flex;flex-direction:column;align-items:center;gap:calc(var(--u)*7);
+  padding:calc(var(--u)*30) var(--gut);text-align:center}
+
+/* the iOS system-haptic trick: a real switch we click programmatically */
+#haptic{position:absolute;opacity:0;pointer-events:none;width:0;height:0}
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <div id="pda" class="booting">
+
+    <div id="binding" class="chrome"></div>
+
+    <header id="head" class="chrome">
+      <button id="back" type="button" aria-label="Back" hidden></button>
+      <div class="ttl"><span id="title"></span></div>
+      <button id="act" class="hbtn" type="button" aria-label="Action" hidden></button>
+    </header>
+
+    <main id="main" class="chrome"><div id="sheet"></div></main>
+
+    <footer id="foot" class="chrome">
+      <div id="save">
+        <button id="saveBtn" type="button">
+          <span id="saveWord"></span>
+          <span id="lampRow"><span class="lamp"></span><span id="saveSub"></span></span>
+        </button>
+        <div id="saveRow">
+          <div class="sfield"><span><i></i><b id="f1"></b></span><span><i></i><b id="f2"></b></span><i></i></div>
+          <div class="sfield"><span><i></i><b id="f3"></b></span><span><i></i><b id="f4"></b></span><i></i></div>
+          <div class="sfield"><span id="f5"></span></div>
+        </div>
+      </div>
+      <div id="colophon">
+        <div class="lines">
+          <span id="cop1"></span>
+          <span id="cop2"></span>
+        </div>
+        <span id="logo"></span>
+      </div>
+    </footer>
+
+    <div id="boot"><canvas id="bootc"></canvas></div>
+    <div id="scan"></div>
+    <div id="vig"></div>
+    <div id="modal"><div id="modalBox"></div></div>
+    <div id="toast"><span id="toastT"></span></div>
+  </div>
+</div>
+
+<input id="haptic" type="checkbox" switch tabindex="-1" aria-hidden="true">
+
+<script>
+"use strict";
+/* =============================================================
+   C.A.T. PDA firmware
+   ============================================================= */
+const APP_VER = "1.1.0";
+const BUILD   = "22";           /* the unit reports "VERSION 22" */
+
+/* ---------- 5x7 bitmap typeface -------------------------------
+   Each glyph is 7 rows; bit 4 (0x10) is the leftmost column.
+   Uppercase only - the unit's character generator has no
+   lowercase ROM, so lowercase input is folded up.            */
+const GLYPH = {
+" ":[0,0,0,0,0,0,0],
+"!":[4,4,4,4,4,0,4],
+'"':[10,10,0,0,0,0,0],
+"#":[10,10,31,10,31,10,10],
+"$":[4,15,20,14,5,30,4],
+"%":[24,25,2,4,8,19,3],
+"&":[8,20,20,8,21,18,13],
+"'":[4,4,0,0,0,0,0],
+"(":[2,4,8,8,8,4,2],
+")":[8,4,2,2,2,4,8],
+"*":[0,4,21,14,21,4,0],
+"+":[0,4,4,31,4,4,0],
+",":[0,0,0,0,0,4,8],
+"-":[0,0,0,31,0,0,0],
+".":[0,0,0,0,0,12,12],
+"/":[0,1,2,4,8,16,0],
+"0":[14,17,19,21,25,17,14],
+"1":[4,12,4,4,4,4,14],
+"2":[14,17,1,2,4,8,31],
+"3":[31,2,4,2,1,17,14],
+"4":[2,6,10,18,31,2,2],
+"5":[31,16,30,1,1,17,14],
+"6":[6,8,16,30,17,17,14],
+"7":[31,1,2,4,8,8,8],
+"8":[14,17,17,14,17,17,14],
+"9":[14,17,17,15,1,2,12],
+":":[0,12,12,0,12,12,0],
+";":[0,12,12,0,12,4,8],
+"<":[2,4,8,16,8,4,2],
+"=":[0,0,31,0,31,0,0],
+">":[8,4,2,1,2,4,8],
+"?":[14,17,1,2,4,0,4],
+"@":[14,17,1,13,21,21,14],
+"A":[14,17,17,31,17,17,17],
+"B":[30,17,17,30,17,17,30],
+"C":[14,17,16,16,16,17,14],
+"D":[28,18,17,17,17,18,28],
+"E":[31,16,16,30,16,16,31],
+"F":[31,16,16,30,16,16,16],
+"G":[14,17,16,23,17,17,15],
+"H":[17,17,17,31,17,17,17],
+"I":[14,4,4,4,4,4,14],
+"J":[7,2,2,2,2,18,12],
+"K":[17,18,20,24,20,18,17],
+"L":[16,16,16,16,16,16,31],
+"M":[17,27,21,21,17,17,17],
+"N":[17,17,25,21,19,17,17],
+"O":[14,17,17,17,17,17,14],
+"P":[30,17,17,30,16,16,16],
+"Q":[14,17,17,17,21,18,13],
+"R":[30,17,17,30,20,18,17],
+"S":[15,16,16,14,1,1,30],
+"T":[31,4,4,4,4,4,4],
+"U":[17,17,17,17,17,17,14],
+"V":[17,17,17,17,17,10,4],
+"W":[17,17,17,21,21,27,17],
+"X":[17,17,10,4,10,17,17],
+"Y":[17,17,10,4,4,4,4],
+"Z":[31,1,2,4,8,16,31],
+"[":[14,8,8,8,8,8,14],
+"\\":[0,16,8,4,2,1,0],
+"]":[14,2,2,2,2,2,14],
+"^":[4,10,17,0,0,0,0],
+"_":[0,0,0,0,0,0,31],
+"|":[4,4,4,4,4,4,4],
+"~":[0,0,8,21,2,0,0],
+"°":[12,18,18,12,0,0,0]
+};
+const GW = 5, GH = 7;
+const glyph = ch => GLYPH[ch] || GLYPH["?"];
+
+/* Measure a string in glyph cells (1 cell of tracking between glyphs). */
+function bmpCells(text, track){
+  track = track == null ? 1 : track;
+  const t = String(text).toUpperCase();
+  return t.length ? t.length*GW + (t.length-1)*track : 0;
+}
+
+/* Draw pixel text onto a 2d context at `cell` device pixels per cell.
+   cellY defaults to cell; passing a taller cellY gives the condensed,
+   heavy-barred display face the boot logo uses. */
+function bmpDraw(ctx, text, ox, oy, cell, color, track, cellY){
+  track = track == null ? 1 : track;
+  const cy = cellY || cell;
+  const t = String(text).toUpperCase();
+  ctx.fillStyle = color;
+  let x = ox;
+  for (let i=0;i<t.length;i++){
+    const g = glyph(t[i]);
+    for (let r=0;r<GH;r++){
+      const bits = g[r];
+      if (!bits) continue;
+      let run = 0;
+      for (let c=0;c<GW;c++){
+        const on = (bits >> (GW-1-c)) & 1;
+        if (on){ run++; continue; }
+        if (run){ ctx.fillRect(x+(c-run)*cell, oy+r*cy, run*cell, cy); run = 0; }
+      }
+      if (run) ctx.fillRect(x+(GW-run)*cell, oy+r*cy, run*cell, cy);
+    }
+    x += (GW+track)*cell;
+  }
+}
+
+/* ---------- pixel-text DOM elements ---------------------------
+   A <canvas> is rendered at device resolution for the current
+   --u, so the type stays crisp at any scale. Everything tagged
+   [data-bmp] is repainted whenever the unit is resized.       */
+let U = 1;                                   /* logical unit, px  */
+const DPR = () => Math.min(window.devicePixelRatio || 1, 3);
+
+/* Pixel text stores a palette KEY, not a hex value, so a repaint
+   after a palette change picks up the new colour. */
+let PAL = {ink:"#000000", ink2:"#5a5a5a", lite:"#ffffff", mid:"#8a8a8a", base:"#000000"};
+function readPalette(){
+  const cs = getComputedStyle(document.documentElement);
+  const g = (n, fb) => (cs.getPropertyValue(n) || "").trim() || fb;
+  PAL = {
+    ink:  g("--c-ink",   "#000000"),
+    ink2: g("--c-ink-2", "#5a5a5a"),
+    lite: g("--c-lite",  "#ffffff"),
+    mid:  g("--c-mid",   "#8a8a8a"),
+    base: g("--c-olive", "#000000")
+  };
+}
+const inkOf = k => (k && PAL[k]) || k || PAL.ink;
+
+function paintBmp(el){
+  const text  = el.dataset.bmp || "";
+  const s     = parseFloat(el.dataset.s || "2");      /* cells -> logical px */
+  const color = inkOf(el.dataset.color);
+  const track = parseFloat(el.dataset.track || "1");
+  const dpr   = DPR();
+  const cell  = Math.max(1, Math.round(U*s*dpr));     /* device px per cell */
+  const cells = bmpCells(text, track);
+  const w = Math.max(1, cells*cell), h = GH*cell;
+  const cv = el.tagName === "CANVAS" ? el : null;
+  if (!cv) return;
+  cv.width = w; cv.height = h;
+  cv.style.width  = (w/dpr) + "px";
+  cv.style.height = (h/dpr) + "px";
+  const ctx = cv.getContext("2d");
+  ctx.clearRect(0,0,w,h);
+  bmpDraw(ctx, text, 0, 0, cell, color, track);
+}
+
+/* Build a pixel-text node. s = logical px per cell (glyph is 7 cells tall). */
+function bmp(text, s, color, track){
+  const cv = document.createElement("canvas");
+  cv.className = "bmp";
+  cv.dataset.bmp = text == null ? "" : String(text);
+  cv.dataset.s = s == null ? 2 : s;
+  if (color) cv.dataset.color = color;
+  if (track != null) cv.dataset.track = track;
+  cv.setAttribute("role","img");
+  cv.setAttribute("aria-label", String(text == null ? "" : text));
+  paintBmp(cv);
+  return cv;
+}
+function setBmp(host, text, s, color, track){
+  host.textContent = "";
+  host.appendChild(bmp(text, s, color, track));
+}
+function repaintAllBmp(root){
+  (root || document).querySelectorAll("canvas.bmp").forEach(paintBmp);
+}
+
+/* ---------- tiny DOM helper ------------------------------------ */
+function h(tag, attrs){
+  const el = document.createElement(tag);
+  if (attrs) for (const k in attrs){
+    const v = attrs[k];
+    if (v == null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k === "text") el.textContent = v;
+    else if (k === "html") el.innerHTML = v;
+    else if (k.slice(0,2) === "on") el.addEventListener(k.slice(2), v);
+    else if (k === "data") { for (const d in v) el.dataset[d] = v[d]; }
+    else if (k in el && k !== "list" && k !== "type") { try { el[k] = v; } catch(e){ el.setAttribute(k, v); } }
+    else el.setAttribute(k, v);
+  }
+  for (let i=2;i<arguments.length;i++){
+    const c = arguments[i];
+    if (c == null || c === false) continue;         /* never append "null" */
+    if (Array.isArray(c)) c.forEach(n => { if (n != null && n !== false) el.appendChild(n); });
+    else if (typeof c === "string" || typeof c === "number") el.appendChild(document.createTextNode(String(c)));
+    else el.appendChild(c);
+  }
+  return el;
+}
+const $ = sel => document.querySelector(sel);
+
+/* ---------- misc utils ----------------------------------------- */
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,8);
+const clamp = (v,a,b) => v < a ? a : v > b ? b : v;
+const DAY = 86400000;
+
+function startOfDay(t){ const d = new Date(t); d.setHours(0,0,0,0); return d.getTime(); }
+function pad2(n){ return n < 10 ? "0"+n : ""+n; }
+
+function fmtDue(ms){
+  if (!ms) return "";
+  const d = new Date(ms);
+  const today = startOfDay(Date.now());
+  const dd = startOfDay(ms);
+  const diff = Math.round((dd - today)/DAY);
+  const time = pad2(d.getHours())+":"+pad2(d.getMinutes());
+  if (diff === 0)  return "TODAY "+time;
+  if (diff === 1)  return "TMRW "+time;
+  if (diff === -1) return "YSTDY "+time;
+  if (diff > 1 && diff < 7)  return ["SUN","MON","TUE","WED","THU","FRI","SAT"][d.getDay()]+" "+time;
+  return pad2(d.getDate())+"/"+pad2(d.getMonth()+1)+"/"+String(d.getFullYear()).slice(2)+" "+time;
+}
+function fmtStamp(ms){
+  if (!ms) return "NULL";
+  const d = new Date(ms);
+  return pad2(d.getDate())+"."+pad2(d.getMonth()+1)+"."+String(d.getFullYear()).slice(2)
+       + " " + pad2(d.getHours())+":"+pad2(d.getMinutes());
+}
+/* value for <input type="datetime-local"> (local time, not ISO/UTC) */
+function toLocalInput(ms){
+  if (!ms) return "";
+  const d = new Date(ms);
+  return d.getFullYear()+"-"+pad2(d.getMonth()+1)+"-"+pad2(d.getDate())
+       + "T" + pad2(d.getHours())+":"+pad2(d.getMinutes());
+}
+function fromLocalInput(v){
+  if (!v) return null;
+  const t = new Date(v).getTime();
+  return isNaN(t) ? null : t;
+}
+function bytes(n){
+  if (n == null) return "NULL";
+  if (n < 1024) return n+" B";
+  if (n < 1048576) return (n/1024).toFixed(1)+" KB";
+  return (n/1048576).toFixed(2)+" MB";
+}
+
+/* =============================================================
+   STORAGE
+   IndexedDB, because MEDIA holds photo/audio blobs. Guarded per
+   ios-web-landmines: a blocked open() never fires success OR
+   error, so always attach onblocked AND a reject timeout.
+   ============================================================= */
+const DB_NAME = "cat-pda", DB_VER = 1;
+const STORES  = ["tasks","media","kv"];
+let db = null;
+
+function openDB(){
+  return new Promise((res, rej) => {
+    let settled = false;
+    const done = fn => (...a) => { if (!settled){ settled = true; fn(...a); } };
+    const ok = done(res), no = done(rej);
+    const to = setTimeout(() => no(new Error("DB_TIMEOUT")), 6000);
+    let req;
+    try { req = indexedDB.open(DB_NAME, DB_VER); }
+    catch(e){ clearTimeout(to); return no(e); }
+    req.onupgradeneeded = ev => {
+      const d = ev.target.result;
+      STORES.forEach(s => { if (!d.objectStoreNames.contains(s)) d.createObjectStore(s, {keyPath:"id"}); });
+    };
+    req.onsuccess = () => { clearTimeout(to); ok(req.result); };
+    req.onerror   = () => { clearTimeout(to); no(req.error || new Error("DB_ERR")); };
+    req.onblocked = () => { clearTimeout(to); no(new Error("DB_BLOCKED")); };
+  });
+}
+function tx(store, mode){ return db.transaction(store, mode).objectStore(store); }
+function idbAll(store){
+  return new Promise((res, rej) => {
+    const r = tx(store,"readonly").getAll();
+    r.onsuccess = () => res(r.result || []);
+    r.onerror   = () => rej(r.error);
+  });
+}
+function idbPut(store, val){
+  return new Promise((res, rej) => {
+    const r = tx(store,"readwrite").put(val);
+    r.onsuccess = () => res(val);
+    r.onerror   = () => rej(r.error);
+  });
+}
+function idbDel(store, id){
+  return new Promise((res, rej) => {
+    const r = tx(store,"readwrite").delete(id);
+    r.onsuccess = () => res();
+    r.onerror   = () => rej(r.error);
+  });
+}
+function idbClear(store){
+  return new Promise((res, rej) => {
+    const r = tx(store,"readwrite").clear();
+    r.onsuccess = () => res();
+    r.onerror   = () => rej(r.error);
+  });
+}
+function idbBulk(store, list){
+  return new Promise((res, rej) => {
+    const t = db.transaction(store,"readwrite"), s = t.objectStore(store);
+    list.forEach(v => s.put(v));
+    t.oncomplete = () => res();
+    t.onerror    = () => rej(t.error);
+  });
+}
+</script>
+
+<script>
+"use strict";
+/* =============================================================
+   STATE
+   ============================================================= */
+const S = {
+  tasks: [],
+  media: [],
+  cfg: {
+    id:"cfg",
+    view:"square",      /* square | fit                      */
+    scan:true,          /* scanline + vignette overlay       */
+    boot:true,          /* play the boot sequence            */
+    sound:true,
+    haptic:true,
+    backlight:100,
+    sort:"due",         /* due | made | prio                 */
+    showDone:false,
+    lastSave:null,
+    installed:null
+  },
+  screen:"home",
+  arg:null,
+  ready:false
+};
+
+const DESIGN_W = 360;   /* the unit's logical grid */
+let LAST_H = 0;         /* last measured panel height, px */
+
+/* =============================================================
+   LAYOUT
+   The standalone-viewport healer. See ios-navbar-fix: in
+   home-screen mode innerHeight / dvh / visualViewport can ALL
+   report short by status-bar + home-indicator while the canvas
+   is genuinely fullscreen. screen.width/height are the only
+   honest numbers, so grow (never shrink) toward them.
+   ============================================================= */
+const isStandalone = () =>
+  window.navigator.standalone === true ||
+  (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches);
+
+function fixShell(){
+  const vv = window.visualViewport;
+  let target = vv ? vv.height : window.innerHeight;
+  if (isStandalone()){
+    const portrait = window.innerHeight >= window.innerWidth;
+    const long  = Math.max(screen.width, screen.height);
+    const short = Math.min(screen.width, screen.height);
+    target = Math.max(target, portrait ? long : short);
+  }
+  const grow = target - window.innerHeight;
+  if (grow > 2 && grow <= 140){
+    document.documentElement.style.height = target + "px";
+    document.body.style.height = target + "px";
+    document.body.classList.add("vfix");
+  } else if (grow <= 2){
+    document.documentElement.style.height = "";
+    document.body.style.height = "";
+    document.body.classList.remove("vfix");
+  }
+  layout();
+}
+
+/* Size the unit inside the stage and publish --u. */
+function layout(){
+  const stage = $("#stage"), pda = $("#pda");
+  const r = stage.getBoundingClientRect();
+  const cs = getComputedStyle(stage);
+  const availW = r.width  - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  const availH = r.height - parseFloat(cs.paddingTop)  - parseFloat(cs.paddingBottom);
+  if (availW <= 0 || availH <= 0) return;
+
+  let w, ht;
+  if (S.cfg.view === "square"){
+    const side = Math.min(availW, availH);
+    w = side; ht = side;
+  } else {
+    w = availW; ht = availH;
+  }
+  pda.style.width  = Math.round(w) + "px";
+  pda.style.height = Math.round(ht) + "px";
+
+  const nu = w / DESIGN_W;
+  const uChanged = Math.abs(nu - U) > 0.001;
+  if (uChanged){
+    U = nu;
+    document.documentElement.style.setProperty("--u", U + "px");
+    repaintAllBmp();
+  }
+  /* The home screen's band count depends on panel HEIGHT, and
+     square -> fit on a portrait phone changes only the height, so
+     watching --u alone would miss it. */
+  const hNow = Math.round(ht);
+  if (S.ready && S.screen === "home" && (uChanged || hNow !== LAST_H)) render();
+  LAST_H = hNow;
+
+  sizeBootCanvas();
+}
+
+/* =============================================================
+   FEEDBACK: beep, haptic, toast
+   ============================================================= */
+let AC = null;
+function beep(freq, ms, type, vol){
+  if (!S.cfg.sound) return;
+  try{
+    AC = AC || new (window.AudioContext || window.webkitAudioContext)();
+    if (AC.state === "suspended") AC.resume();
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.type = type || "square";
+    o.frequency.value = freq;
+    const t = AC.currentTime, d = (ms||40)/1000;
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(vol || .05, t + .006);
+    g.gain.exponentialRampToValueAtTime(.0001, t + d);
+    o.connect(g).connect(AC.destination);
+    o.start(t); o.stop(t + d + .02);
+  }catch(e){}
+}
+const clickSfx  = () => beep(880, 26, "square", .045);
+const okSfx     = () => { beep(660,40,"square",.05); setTimeout(()=>beep(990,60,"square",.05),55); };
+const errSfx    = () => { beep(160,110,"sawtooth",.05); };
+
+/* iOS WebKit has no navigator.vibrate. A programmatic click on a
+   real <input type=checkbox switch> fires the system haptic. */
+function haptic(){
+  if (!S.cfg.haptic) return;
+  const el = $("#haptic");
+  if (el) { try { el.click(); } catch(e){} }
+}
+function tapFx(){ clickSfx(); haptic(); }
+
+let toastT = null;
+function toast(msg){
+  const box = $("#toast");
+  setBmp($("#toastT"), msg, 1.6, "lite");
+  box.classList.add("on");
+  clearTimeout(toastT);
+  toastT = setTimeout(() => box.classList.remove("on"), 1700);
+}
+
+/* =============================================================
+   MODAL
+   ============================================================= */
+let modalCb = null;
+function confirmBox(title, body, okLabel, cb){
+  const box = $("#modalBox");
+  box.textContent = "";
+  box.appendChild(bmp(title, 2.1));
+  box.appendChild(h("div",{class:"note",style:"font-size:calc(var(--u)*12)",text:body}));
+  const close = ok => { $("#modal").classList.remove("on"); modalCb = null; if (ok) cb(); };
+  box.appendChild(h("div",{class:"row2"},
+    h("button",{class:"card tap",style:"display:flex;justify-content:center",
+      onclick:()=>{ tapFx(); close(false); }}, bmp("CANCEL", 1.9)),
+    h("button",{class:"card tap",style:"display:flex;justify-content:center;background:var(--c-ink)",
+      onclick:()=>{ tapFx(); close(true); }}, bmp(okLabel, 1.9, "lite"))
+  ));
+  $("#modal").classList.add("on");
+  modalCb = close;
+}
+
+/* =============================================================
+   BOOT SEQUENCE
+   1  0.00-1.05s  animated static, "WIRELESS ACCESS POINT"
+   2  1.05-1.35s  static falls away
+   3  1.35-2.55s  "JOUST." on the olive field
+   4  2.55-2.90s  fade through to the home screen (no static)
+   Tap anywhere to skip.
+   ============================================================= */
+const T_STATIC = 1050, T_WIPE = 300, T_JOUST = 1200, T_OUT = 350;
+const T_TOTAL  = T_STATIC + T_WIPE + T_JOUST + T_OUT;
+
+const NOISE_W = 384;            /* internal resolution of the static */
+let noiseFrames = [], bootRAF = 0, bootStart = 0, bootDone = false;
+
+function sizeBootCanvas(){
+  const cv = $("#bootc"), pda = $("#pda");
+  if (!cv || !pda) return;
+  const w = pda.clientWidth, ht = pda.clientHeight;
+  if (!w || !ht) return;
+  const iw = NOISE_W, ih = Math.max(16, Math.round(NOISE_W * ht / w));
+  if (cv.width !== iw || cv.height !== ih){
+    cv.width = iw; cv.height = ih;
+    noiseFrames = [];               /* geometry changed - regenerate */
+  }
+}
+
+function makeNoise(ctx, w, ht){
+  const img = ctx.createImageData(w, ht), d = img.data;
+  for (let i=0;i<d.length;i+=4){
+    /* neutral grey grain with occasional blown-out specks */
+    const g = Math.random() < 0.0022
+      ? 175 + (Math.random()*80|0)
+      : 8 + (Math.random()*58|0);
+    d[i] = d[i+1] = d[i+2] = g;
+    d[i+3] = 255;
+  }
+  return img;
+}
+
+function drawStatic(ctx, w, ht, t){
+  if (!noiseFrames.length){
+    for (let i=0;i<5;i++) noiseFrames.push(makeNoise(ctx, w, ht));
+  }
+  const f = noiseFrames[(t/55|0) % noiseFrames.length];
+  ctx.putImageData(f, 0, 0);
+
+  /* the lit plate the caption sits on */
+  const label = "WIRELESS ACCESS POINT";
+  const cell  = Math.max(1, Math.round(w/384));
+  const tw = bmpCells(label,1)*cell, th = GH*cell;
+  const x = Math.round((w - tw)/2), y = Math.round(ht*0.40 - th/2);
+  ctx.save();
+  ctx.globalAlpha = 0.34;
+  ctx.fillStyle = "#d8d8d8";
+  ctx.fillRect(x - cell*3, y - cell*2, tw + cell*6, th + cell*4);
+  ctx.restore();
+  bmpDraw(ctx, label, x, y, cell, "#ffffff", 1);
+}
+
+function drawJoust(ctx, w, ht, k){
+  /* k: 0 -> 1 across the JOUST hold */
+  ctx.fillStyle = "#000000";
+  ctx.fillRect(0,0,w,ht);
+
+  const word = "JOUST.";
+  /* the display face is condensed: cells are ~1.4x taller than wide,
+     which is what gives the logo its heavy horizontal bars */
+  const cell  = Math.max(2, Math.floor(w * 0.74 / bmpCells(word,1)));
+  const cellY = Math.max(2, Math.round(cell * 1.42));
+  const tw = bmpCells(word,1)*cell, th = GH*cellY;
+  const x = Math.round((w - tw)/2), y = Math.round((ht - th)/2);
+
+  /* the projector's split, kept monochrome: grey ghosts either side
+     rather than colour fringes */
+  const off = Math.max(1, Math.round(cell*0.30));
+  ctx.globalAlpha = 0.55;
+  bmpDraw(ctx, word, x - off, y, cell, "#6e6e6e", 1, cellY);
+  bmpDraw(ctx, word, x + off, y, cell, "#9a9a9a", 1, cellY);
+  ctx.globalAlpha = 1;
+  bmpDraw(ctx, word, x, y, cell, "#ffffff", 1, cellY);
+
+  /* brief flicker on entry */
+  if (k < 0.18 && Math.random() < 0.30){
+    ctx.save(); ctx.globalAlpha = 0.35; ctx.fillStyle = "#000000";
+    ctx.fillRect(0,0,w,ht); ctx.restore();
+  }
+}
+
+function bootFrame(now){
+  const cv = $("#bootc"), ctx = cv.getContext("2d");
+  const w = cv.width, ht = cv.height;
+  const t = now - bootStart;
+
+  if (t < T_STATIC){
+    drawStatic(ctx, w, ht, t);
+  } else if (t < T_STATIC + T_WIPE){
+    const k = (t - T_STATIC) / T_WIPE;
+    drawStatic(ctx, w, ht, t);
+    ctx.save();
+    ctx.globalAlpha = k;
+    ctx.fillStyle = "#000000";
+    ctx.fillRect(0,0,w,ht);
+    ctx.restore();
+  } else if (t < T_STATIC + T_WIPE + T_JOUST){
+    drawJoust(ctx, w, ht, (t - T_STATIC - T_WIPE)/T_JOUST);
+  } else {
+    drawJoust(ctx, w, ht, 1);
+    endBoot();
+    return;
+  }
+  bootRAF = requestAnimationFrame(bootFrame);
+}
+
+function endBoot(){
+  if (bootDone) return;
+  bootDone = true;
+  cancelAnimationFrame(bootRAF);
+  noiseFrames = [];                       /* free the frames */
+  const boot = $("#boot"), pda = $("#pda");
+  pda.classList.remove("booting");
+  boot.classList.add("gone");
+  setTimeout(() => { boot.style.display = "none"; }, 320);
+  okSfx();
+}
+
+function runBoot(){
+  const boot = $("#boot"), pda = $("#pda");
+  if (!S.cfg.boot){
+    bootDone = true;
+    pda.classList.remove("booting");
+    boot.style.display = "none";
+    return;
+  }
+  sizeBootCanvas();
+  bootStart = performance.now();
+  bootRAF = requestAnimationFrame(bootFrame);
+  boot.addEventListener("click", endBoot, {once:true});
+}
+</script>
+
+<script>
+"use strict";
+/* =============================================================
+   TASK MODEL
+   Records are referenced by id everywhere and schema changes are
+   additive only; import fills gaps via {defaults, ...record}.
+   ============================================================= */
+const TASK_DEFAULTS = {
+  id:"", title:"", notes:"", due:null, repeat:"none", prio:0, tag:"",
+  done:false, doneAt:null, created:0, updated:0, sub:[], archived:false
+};
+const REPEATS = [
+  ["none","ONCE"], ["daily","DAILY"], ["weekdays","WEEKDAYS"],
+  ["weekly","WEEKLY"], ["monthly","MONTHLY"]
+];
+const PRIOS = [["0","LOW"],["1","MED"],["2","HIGH"]];
+
+const norm = t => Object.assign({}, TASK_DEFAULTS, t, {sub:(t.sub||[]).slice()});
+const live = () => S.tasks.filter(t => !t.archived);
+const open_ = () => live().filter(t => !t.done);
+
+function advance(ms, repeat){
+  const d = new Date(ms);
+  switch(repeat){
+    case "daily":    d.setDate(d.getDate()+1); break;
+    case "weekly":   d.setDate(d.getDate()+7); break;
+    case "monthly":  d.setMonth(d.getMonth()+1); break;
+    case "weekdays":
+      do { d.setDate(d.getDate()+1); } while (d.getDay()===0 || d.getDay()===6);
+      break;
+    default: return null;
+  }
+  return d.getTime();
+}
+/* Roll a recurring due date forward until it is in the future. */
+function rollForward(ms, repeat){
+  let n = advance(ms, repeat), guard = 0;
+  while (n && n <= Date.now() && guard++ < 500) n = advance(n, repeat);
+  return n;
+}
+
+async function saveTask(t){
+  t.updated = Date.now();
+  const i = S.tasks.findIndex(x => x.id === t.id);
+  if (i >= 0) S.tasks[i] = t; else S.tasks.push(t);
+  await idbPut("tasks", t);
+  await touchSave();
+}
+async function toggleTask(t){
+  if (!t.done && t.repeat !== "none" && t.due){
+    /* a recurring task never completes - it advances */
+    const next = rollForward(t.due, t.repeat);
+    t.due = next;
+    t.doneAt = Date.now();
+    await saveTask(t);
+    toast("ROLLED TO " + fmtDue(next));
+    return;
+  }
+  t.done = !t.done;
+  t.doneAt = t.done ? Date.now() : null;
+  await saveTask(t);
+}
+async function deleteTask(id){
+  S.tasks = S.tasks.filter(t => t.id !== id);
+  await idbDel("tasks", id);
+  await touchSave();
+}
+
+function bucket(t){
+  if (t.done) return "done";
+  if (!t.due) return "someday";
+  const today = startOfDay(Date.now());
+  if (t.due < Date.now()) return "overdue";
+  if (startOfDay(t.due) === today) return "today";
+  return "upcoming";
+}
+function sortTasks(list){
+  const by = S.cfg.sort;
+  const c = list.slice();
+  if (by === "due")  c.sort((a,b) => (a.due||8.64e15)-(b.due||8.64e15) || b.prio-a.prio);
+  if (by === "prio") c.sort((a,b) => b.prio-a.prio || (a.due||8.64e15)-(b.due||8.64e15));
+  if (by === "made") c.sort((a,b) => b.created-a.created);
+  return c;
+}
+const allTags = () => {
+  const s = new Set();
+  S.tasks.forEach(t => { if (t.tag) s.add(t.tag); });
+  return [...s].sort();
+};
+
+/* ---------- calendar hand-off ---------------------------------
+   Backgrounded iOS freezes page JS, so a purely local timer can
+   never fire a reliable alert. Handing the item to the system
+   calendar is the honest way to get a real notification.      */
+function icsEscape(s){ return String(s||"").replace(/([,;\\])/g,"\\$1").replace(/\n/g,"\\n"); }
+function icsStamp(ms){
+  const d = new Date(ms);
+  return d.getUTCFullYear()+pad2(d.getUTCMonth()+1)+pad2(d.getUTCDate())+"T"
+       + pad2(d.getUTCHours())+pad2(d.getUTCMinutes())+pad2(d.getUTCSeconds())+"Z";
+}
+const RRULE = {daily:"FREQ=DAILY",weekly:"FREQ=WEEKLY",monthly:"FREQ=MONTHLY",
+               weekdays:"FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"};
+function icsFor(tasks){
+  const L = ["BEGIN:VCALENDAR","VERSION:2.0","PRODID:-//JOUST ELECTRONICS//C.A.T. PDA "+BUILD+"//EN","CALSCALE:GREGORIAN"];
+  tasks.forEach(t => {
+    if (!t.due) return;
+    L.push("BEGIN:VEVENT");
+    L.push("UID:"+t.id+"@cat-pda");
+    L.push("DTSTAMP:"+icsStamp(Date.now()));
+    L.push("DTSTART:"+icsStamp(t.due));
+    L.push("DTEND:"+icsStamp(t.due + 1800000));
+    L.push("SUMMARY:"+icsEscape(t.title));
+    if (t.notes) L.push("DESCRIPTION:"+icsEscape(t.notes));
+    if (RRULE[t.repeat]) L.push("RRULE:"+RRULE[t.repeat]);
+    L.push("BEGIN:VALARM","ACTION:DISPLAY","TRIGGER:-PT10M",
+           "DESCRIPTION:"+icsEscape(t.title),"END:VALARM");
+    L.push("END:VEVENT");
+  });
+  L.push("END:VCALENDAR");
+  return L.join("\r\n");
+}
+function download(name, text, mime){
+  const blob = text instanceof Blob ? text : new Blob([text], {type: mime || "text/plain"});
+  const url = URL.createObjectURL(blob);
+  const a = h("a",{href:url, download:name});
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+/* =============================================================
+   ROUTER
+   ============================================================= */
+const SCREENS = {};
+function go(screen, arg){
+  /* leaving an editor discards its draft - draw() rebuilds on
+     every re-render, so the draft must outlive renders but not
+     navigation */
+  if (screen !== "edit") draft = null;
+  if (screen !== "note") noteDraft = null;
+  S.screen = screen; S.arg = arg;
+  $("#main").scrollTop = 0;
+  render();
+}
+function render(){
+  const sheet = $("#sheet");
+  sheet.textContent = "";
+  const def = SCREENS[S.screen] || SCREENS.home;
+  $("#main").className = "chrome" + (def.free ? " free" : "");
+  setBmp($("#title"), def.title(), def.titleSize || 2.0);
+  const back = $("#back");
+  back.hidden = !def.back;
+  if (def.back) setBmp(back, "<", 2.2);
+  const act = $("#act");
+  act.hidden = !def.act;
+  if (def.act){
+    setBmp(act, def.act.icon, 2.4);
+    act.onclick = () => { tapFx(); def.act.run(); };
+  }
+  /* Set this BEFORE draw(): the home screen measures #main to decide
+     how many priority rows fit, and the footer changes that height. */
+  const foot = $("#foot");
+  foot.hidden = !def.foot;
+  if (def.foot) paintFooter();
+
+  def.draw(sheet);
+  repaintAllBmp(sheet);
+}
+$("#back") && ($("#back").onclick = () => { tapFx(); const d = SCREENS[S.screen]; go(d.back === true ? "home" : d.back, d.backArg && d.backArg()); });
+
+/* shared bits ------------------------------------------------- */
+function sectionLabel(text){
+  return h("div",{class:"sect"}, bmp(text, 1.7, "lite"), h("div",{class:"rule"}));
+}
+function bigButton(label, fn, invert){
+  const b = h("button",{class:"card tap", type:"button",
+    style:"display:flex;align-items:center;justify-content:center;gap:calc(var(--u)*6)"
+      + (invert ? ";background:var(--c-ink)" : ""),
+    onclick:()=>{ tapFx(); fn(); }},
+    bmp(label, 1.9, invert ? "lite" : "ink"));
+  return b;
+}
+function emptyState(line1, line2){
+  return h("div",{class:"empty"},
+    bmp(line1, 2.0, "lite"),
+    line2 ? bmp(line2, 1.4, "mid") : null);
+}
+
+/* =============================================================
+   HOME  - the menu, kept as the unit ships it
+   ============================================================= */
+const MENU = [
+  ["TASKS",    "tasks",    () => { const n = open_().filter(t => t.due && t.due < Date.now()).length;
+                                   return n ? n + " DUE" : String(open_().length); }],
+  ["DATABASE", "database", () => String(S.tasks.length + S.media.length)],
+  ["MEDIA",    "media",    () => String(S.media.length)],
+  ["HARDWARE", "hardware", () => S.cfg.view === "square" ? "1:1" : "FIT"]
+];
+
+/* What deserves the leftover bands: overdue first, then priority,
+   then soonest. */
+function priorityQueue(){
+  const now = Date.now();
+  return open_().slice().sort((a,b) => {
+    const ao = (a.due && a.due < now) ? 1 : 0, bo = (b.due && b.due < now) ? 1 : 0;
+    if (ao !== bo) return bo - ao;
+    if (a.prio !== b.prio) return b.prio - a.prio;
+    return (a.due || 8.64e15) - (b.due || 8.64e15);
+  });
+}
+const BAND_U = 25;   /* --band, in logical units */
+
+/* Pixel text cannot ellipsize, so clip the string to the cells that
+   actually fit beside the marker and the due stamp. */
+function fitPixels(text, size, availUnits){
+  const maxChars = Math.floor((availUnits / size + 1) / 6);
+  if (maxChars < 1) return "";
+  const t = String(text);
+  return t.length <= maxChars ? t : t.slice(0, Math.max(1, maxChars - 1)) + ".";
+}
+
+SCREENS.home = {
+  free:false,
+  title:() => "C.A.T. PERSONAL DATA ASSISTANT",
+  titleSize:1.35,
+  back:false,
+  foot:true,
+  draw(sheet){
+    const menu = h("div",{class:"menu"});
+    menu.appendChild(h("div",{class:"band lit"}));      /* blank lead-in band */
+
+    MENU.forEach(([label, route, count]) => {
+      menu.appendChild(h("div",{class:"band"}));        /* dark gap */
+      const row = h("button",{class:"band lit mrow", type:"button",
+        onclick:()=>{ tapFx(); go(route); }});
+      row.appendChild(h("span",{class:"bullet"}));
+      row.appendChild(bmp(label, 2.3));
+      row.appendChild(h("span",{class:"cnt"}, bmp(count(), 1.5, "ink2")));
+      menu.appendChild(row);
+    });
+
+    /* Fill whatever bands are left over - in FIT mode that is most of
+       the panel - rather than tiling empty white bars. */
+    const q = priorityQueue();
+    const bandPx = BAND_U * U;
+    const mainH  = $("#main").clientHeight;
+    const usedBands = 1 + MENU.length * 2;
+    const spare = Math.floor(mainH / bandPx) - usedBands;
+    const rows  = Math.max(0, Math.min(q.length, Math.floor((spare - 1) / 2)));
+
+    if (rows > 0){
+      const head = h("div",{class:"band gaplabel"}, bmp("PRIORITY QUEUE", 1.4, "lite"));
+      menu.appendChild(head);
+      const now = Date.now();
+      q.slice(0, rows).forEach((t, i) => {
+        if (i) menu.appendChild(h("div",{class:"band"}));
+        const late = t.due && t.due < now;
+        const when = t.due ? fmtDue(t.due) : "NO DATE";
+        /* 360 grid: gutters 20, marker 9, two gaps 18, due stamp */
+        const avail = 360 - 20 - 9 - 18 - bmpCells(when, 1) * 1.15;
+        const row = h("button",{class:"band lit mrow", type:"button",
+          onclick:()=>{ tapFx(); go("edit", t.id); }});
+        row.appendChild(h("span",{class:"dot"+(late?" hot":"")}));
+        row.appendChild(bmp(fitPixels(t.title, 1.6, avail), 1.6));
+        row.appendChild(h("span",{class:"when"}, bmp(when, 1.15, late ? "ink" : "ink2")));
+        menu.appendChild(row);
+      });
+    }
+    sheet.appendChild(menu);
+  }
+};
+
+/* =============================================================
+   TASKS
+   ============================================================= */
+function taskCard(t){
+  const tick = h("button",{class:"tick"+(t.done?" on":""), type:"button",
+    "aria-label":"Toggle", onclick:async e => {
+      e.stopPropagation(); tapFx();
+      await toggleTask(t); render();
+    }});
+
+  const meta = h("div",{class:"meta"});
+  if (t.due){
+    const late = !t.done && t.due < Date.now();
+    meta.appendChild(h("span",{class:"chip"+(late?" solid":"")},
+      bmp(fmtDue(t.due), 1.3, late ? "lite" : "ink")));
+  }
+  if (t.repeat !== "none") meta.appendChild(h("span",{class:"chip"}, bmp("RPT "+labelOf(REPEATS,t.repeat), 1.3)));
+  if (t.tag)  meta.appendChild(h("span",{class:"chip"}, bmp("#"+t.tag, 1.3)));
+  if (t.prio) meta.appendChild(h("span",{class:"chip"}, bmp(t.prio===2?"HIGH":"MED", 1.3)));
+  if (t.sub.length){
+    const dn = t.sub.filter(s => s.done).length;
+    meta.appendChild(h("span",{class:"chip"}, bmp(dn+"/"+t.sub.length, 1.3)));
+  }
+
+  const body = h("div",{class:"tbody", onclick:()=>{ tapFx(); go("edit", t.id); }},
+    h("div",{class:"ttl2"+(t.done?" done":""), text:t.title || "UNTITLED"}),
+    meta.children.length ? meta : null,
+    t.notes ? h("div",{class:"note", text:t.notes.length>90 ? t.notes.slice(0,90)+"..." : t.notes}) : null);
+
+  return h("div",{class:"card p"+t.prio},
+    h("div",{class:"trow"}, tick, body));
+}
+const labelOf = (arr, v) => (arr.find(x => x[0] === String(v)) || ["",""])[1];
+
+SCREENS.tasks = {
+  free:true,
+  title:() => "TASKS",
+  back:true,
+  act:{icon:"+", run:() => go("edit","new")},
+  draw(sheet){
+    const wrap = h("div",{class:"pad stack"});
+
+    /* sort control */
+    const seg = h("div",{class:"seg"});
+    [["due","BY DUE"],["prio","BY PRIO"],["made","BY NEW"]].forEach(([k,l]) => {
+      seg.appendChild(h("button",{class: S.cfg.sort===k?"on":"", type:"button",
+        onclick:async ()=>{ tapFx(); S.cfg.sort=k; await saveCfg(); render(); }},
+        bmp(l, 1.5, S.cfg.sort===k ? "lite" : "ink")));
+    });
+    wrap.appendChild(seg);
+
+    const groups = [
+      ["overdue","OVERDUE"], ["today","TODAY"],
+      ["upcoming","UPCOMING"], ["someday","NO DATE"]
+    ];
+    const list = sortTasks(live());
+    let any = false;
+    groups.forEach(([key,label]) => {
+      const g = list.filter(t => bucket(t) === key);
+      if (!g.length) return;
+      any = true;
+      wrap.appendChild(sectionLabel(label + "  " + g.length));
+      g.forEach(t => wrap.appendChild(taskCard(t)));
+    });
+
+    const done = list.filter(t => t.done);
+    if (done.length){
+      wrap.appendChild(h("button",{class:"card flat tap", type:"button",
+        style:"display:flex;justify-content:center",
+        onclick:async ()=>{ tapFx(); S.cfg.showDone = !S.cfg.showDone; await saveCfg(); render(); }},
+        bmp((S.cfg.showDone?"HIDE":"SHOW")+" COMPLETED ("+done.length+")", 1.6)));
+      if (S.cfg.showDone) done.forEach(t => wrap.appendChild(taskCard(t)));
+      any = true;
+    }
+    if (!any) wrap.appendChild(emptyState("NO ENTRIES","PRESS + TO LOG A TASK"));
+    else wrap.appendChild(bigButton("NEW TASK", () => go("edit","new"), true));
+    sheet.appendChild(wrap);
+  }
+};
+
+/* ---------- task editor ---------------------------------------- */
+let draft = null;
+SCREENS.edit = {
+  free:true,
+  title:() => S.arg === "new" ? "NEW TASK" : "EDIT TASK",
+  back:"tasks",
+  draw(sheet){
+    if (!draft){
+      const found = S.arg === "new" ? null : S.tasks.find(t => t.id === S.arg);
+      draft = found ? norm(found) : norm({id:uid(), created:Date.now()});
+    }
+    const d = draft;
+    const wrap = h("div",{class:"pad stack"});
+
+    const title = h("input",{class:"inp", type:"text", value:d.title,
+      placeholder:"Task", enterkeyhint:"done", oninput:e => d.title = e.target.value});
+    wrap.appendChild(h("label",{class:"fld"}, bmp("TITLE",1.5,"lite"), title));
+
+    const due = h("input",{class:"inp", type:"datetime-local", value:toLocalInput(d.due),
+      onchange:e => { d.due = fromLocalInput(e.target.value); render(); }});
+    const clr = h("button",{class:"card flat tap", type:"button",
+      style:"display:flex;justify-content:center;flex:0 0 30%",
+      onclick:()=>{ tapFx(); d.due = null; render(); }}, bmp("CLEAR",1.5));
+    wrap.appendChild(h("label",{class:"fld"}, bmp("DUE",1.5,"lite"),
+      h("div",{class:"row2"}, due, d.due ? clr : null)));
+
+    wrap.appendChild(h("label",{class:"fld"}, bmp("REPEAT",1.5,"lite"),
+      segment(REPEATS, String(d.repeat), v => { d.repeat = v; render(); }, 1.25)));
+
+    wrap.appendChild(h("label",{class:"fld"}, bmp("PRIORITY",1.5,"lite"),
+      segment(PRIOS, String(d.prio), v => { d.prio = +v; render(); }, 1.5)));
+
+    const tag = h("input",{class:"inp", type:"text", value:d.tag, placeholder:"work, home...",
+      oninput:e => d.tag = e.target.value.replace(/[\s#]/g,"").toLowerCase()});
+    wrap.appendChild(h("label",{class:"fld"}, bmp("TAG",1.5,"lite"), tag));
+
+    const notes = h("textarea",{class:"inp", placeholder:"Notes",
+      oninput:e => d.notes = e.target.value});
+    notes.value = d.notes;
+    wrap.appendChild(h("label",{class:"fld"}, bmp("NOTES",1.5,"lite"), notes));
+
+    /* subtasks */
+    wrap.appendChild(sectionLabel("STEPS"));
+    d.sub.forEach((s, i) => {
+      const tk = h("button",{class:"tick"+(s.done?" on":""), type:"button",
+        onclick:()=>{ tapFx(); s.done = !s.done; render(); }});
+      const inp = h("input",{class:"inp", type:"text", value:s.title, placeholder:"Step",
+        style:"border-width:calc(var(--u)*1)",
+        oninput:e => s.title = e.target.value});
+      const del = h("button",{class:"card flat tap del", type:"button",
+        onclick:()=>{ tapFx(); d.sub.splice(i,1); render(); }}, bmp("X",1.5));
+      wrap.appendChild(h("div",{class:"steprow"}, tk, inp, del));
+    });
+    wrap.appendChild(h("button",{class:"card flat tap", type:"button",
+      style:"display:flex;justify-content:center",
+      onclick:()=>{ tapFx(); d.sub.push({id:uid(), title:"", done:false}); render(); }},
+      bmp("+ ADD STEP",1.6)));
+
+    /* actions */
+    wrap.appendChild(sectionLabel("ACTIONS"));
+    wrap.appendChild(bigButton("SAVE", async () => {
+      if (!d.title.trim()){ errSfx(); toast("TITLE REQUIRED"); return; }
+      d.sub = d.sub.filter(s => s.title.trim());
+      await saveTask(norm(d));
+      draft = null; okSfx(); toast("STORED"); go("tasks");
+    }, true));
+    if (d.due) wrap.appendChild(bigButton("ADD TO CALENDAR", () => {
+      download("task-"+d.id+".ics", icsFor([d]), "text/calendar");
+      toast("CALENDAR FILE OUT");
+    }));
+    if (S.arg !== "new") wrap.appendChild(bigButton("DELETE", () => {
+      confirmBox("DELETE?", "This entry will be erased from the unit.", "DELETE", async () => {
+        await deleteTask(d.id); draft = null; toast("ERASED"); go("tasks");
+      });
+    }));
+    sheet.appendChild(wrap);
+  }
+};
+
+function segment(pairs, cur, onPick, size){
+  const seg = h("div",{class:"seg"});
+  pairs.forEach(([k,l]) => {
+    const on = String(cur) === String(k);
+    seg.appendChild(h("button",{class:on?"on":"", type:"button",
+      onclick:()=>{ tapFx(); onPick(k); }},
+      bmp(l, size || 1.4, on ? "lite" : "ink")));
+  });
+  return seg;
+}
+</script>
+
+<script>
+"use strict";
+/* =============================================================
+   DATABASE - the whole record set: search, tags, archive, stats
+   ============================================================= */
+let query = "", tagFilter = "";
+
+SCREENS.database = {
+  free:true,
+  title:() => "DATABASE",
+  back:true,
+  draw(sheet){
+    const wrap = h("div",{class:"pad stack"});
+
+    const q = h("input",{class:"inp", type:"search", value:query, placeholder:"Search records",
+      enterkeyhint:"search", oninput:e => { query = e.target.value; redrawResults(); }});
+    wrap.appendChild(h("label",{class:"fld"}, bmp("QUERY",1.5,"lite"), q));
+
+    const tags = allTags();
+    if (tags.length){
+      const bar = h("div",{class:"meta"});
+      bar.appendChild(tagChip("ALL", "", () => { tagFilter=""; render(); }));
+      tags.forEach(t => bar.appendChild(tagChip("#"+t, t, () => { tagFilter=t; render(); })));
+      wrap.appendChild(bar);
+    }
+
+    const results = h("div",{class:"stack", id:"dbres"});
+    wrap.appendChild(results);
+
+    /* stats */
+    const done = S.tasks.filter(t => t.done).length;
+    const overdue = open_().filter(t => t.due && t.due < Date.now()).length;
+    const week = S.tasks.filter(t => t.doneAt && t.doneAt > Date.now()-7*DAY).length;
+    wrap.appendChild(sectionLabel("STATISTICS"));
+    wrap.appendChild(statGrid([
+      ["TOTAL TASKS", String(S.tasks.length)],
+      ["COMPLETED",   String(done)],
+      ["OPEN",        String(open_().length)],
+      ["OVERDUE",     String(overdue)],
+      ["DONE 7 DAYS", String(week)],
+      ["MEDIA FILES", String(S.media.length)]
+    ]));
+
+    wrap.appendChild(sectionLabel("MAINTENANCE"));
+    wrap.appendChild(bigButton("PURGE COMPLETED", () => {
+      const old = S.tasks.filter(t => t.done);
+      if (!old.length){ toast("NOTHING TO PURGE"); return; }
+      confirmBox("PURGE "+old.length+"?", "Completed entries will be erased permanently.", "PURGE", async () => {
+        for (const t of old) await deleteTask(t.id);
+        toast("PURGED "+old.length); render();
+      });
+    }));
+    wrap.appendChild(bigButton("EXPORT ALL TO CALENDAR", () => {
+      const withDue = open_().filter(t => t.due);
+      if (!withDue.length){ toast("NO DATED TASKS"); return; }
+      download("cat-pda-tasks.ics", icsFor(withDue), "text/calendar");
+      toast("EXPORTED "+withDue.length);
+    }));
+
+    sheet.appendChild(wrap);
+    redrawResults();
+  }
+};
+function tagChip(label, val, fn){
+  const on = tagFilter === val;
+  return h("button",{class:"chip"+(on?" solid":""), type:"button",
+    style:"background:"+(on?"var(--c-ink)":"var(--c-lite)")+";cursor:pointer",
+    onclick:()=>{ tapFx(); fn(); }}, bmp(label, 1.3, on ? "lite" : "ink"));
+}
+function statGrid(pairs){
+  const g = h("div",{class:"card", style:"display:flex;flex-wrap:wrap;gap:calc(var(--u)*8)"});
+  pairs.forEach(([k,v]) => {
+    g.appendChild(h("div",{style:"flex:1 1 40%;display:flex;flex-direction:column;gap:calc(var(--u)*3)"},
+      bmp(k, 1.25, "ink2"), bmp(v, 2.6)));
+  });
+  return g;
+}
+function redrawResults(){
+  const box = document.getElementById("dbres");
+  if (!box) return;
+  box.textContent = "";
+  const qq = query.trim().toLowerCase();
+  let hits = S.tasks.filter(t =>
+    (!tagFilter || t.tag === tagFilter) &&
+    (!qq || (t.title+" "+t.notes+" "+t.tag).toLowerCase().includes(qq)));
+  hits = sortTasks(hits);
+  const mhits = S.media.filter(m =>
+    !tagFilter && (!qq || ((m.title||"")+" "+(m.body||"")).toLowerCase().includes(qq)));
+
+  if (!hits.length && !mhits.length){
+    box.appendChild(emptyState(qq||tagFilter ? "NO MATCH" : "DATABASE EMPTY", null));
+    return;
+  }
+  if (hits.length){
+    box.appendChild(sectionLabel("TASKS  "+hits.length));
+    hits.forEach(t => box.appendChild(taskCard(t)));
+  }
+  if (mhits.length){
+    box.appendChild(sectionLabel("MEDIA  "+mhits.length));
+    mhits.forEach(m => box.appendChild(mediaCard(m, true)));
+  }
+}
+
+/* =============================================================
+   MEDIA - notes, captures, voice memos
+   ============================================================= */
+let objUrls = [];
+function freeUrls(){ objUrls.forEach(u => URL.revokeObjectURL(u)); objUrls = []; }
+function urlFor(blob){ const u = URL.createObjectURL(blob); objUrls.push(u); return u; }
+
+async function saveMedia(m){
+  const i = S.media.findIndex(x => x.id === m.id);
+  if (i >= 0) S.media[i] = m; else S.media.unshift(m);
+  await idbPut("media", m);
+  await touchSave();
+}
+async function deleteMedia(id){
+  S.media = S.media.filter(m => m.id !== id);
+  await idbDel("media", id);
+  await touchSave();
+}
+
+function mediaCard(m, compact){
+  const head = h("div",{style:"display:flex;align-items:center;gap:calc(var(--u)*6)"},
+    bmp(m.kind.toUpperCase(), 1.3, "ink2"),
+    bmp(fmtStamp(m.created), 1.3, "ink2"));
+
+  let body = null;
+  if (m.kind === "photo" && m.blob){
+    body = h("img",{src:urlFor(m.blob), alt:m.title||"capture",
+      style:"width:100%;display:block;margin-top:calc(var(--u)*6);border:calc(var(--u)*2) solid var(--c-ink);filter:grayscale(1) contrast(1.12)"});
+  } else if (m.kind === "audio" && m.blob){
+    body = h("audio",{src:urlFor(m.blob), controls:true,
+      style:"width:100%;margin-top:calc(var(--u)*6)"});
+  } else if (m.body){
+    body = h("div",{class:"note", text:m.body});
+  }
+
+  const del = h("button",{class:"chip", type:"button", style:"cursor:pointer",
+    onclick:()=>{ tapFx(); confirmBox("DELETE FILE?", m.title||m.kind, "DELETE", async () => {
+      await deleteMedia(m.id); toast("ERASED"); render();
+    }); }}, bmp("DEL",1.3));
+
+  const foot = compact ? null : h("div",{class:"meta"}, del);
+  return h("div",{class:"card"},
+    head,
+    h("div",{class:"ttl2", style:"margin-top:calc(var(--u)*4)", text:m.title || "UNTITLED"}),
+    body, foot);
+}
+
+function pickFile(accept, capture, cb){
+  const inp = h("input",{type:"file", accept:accept, style:"position:absolute;left:-9999px"});
+  if (capture) inp.setAttribute("capture","environment");
+  inp.addEventListener("change", () => {
+    const f = inp.files && inp.files[0];
+    if (f) cb(f);
+    inp.remove();
+  });
+  document.body.appendChild(inp);
+  inp.click();
+}
+
+let rec = null, recChunks = [], recTimer = 0;
+async function toggleRecord(){
+  if (rec && rec.state === "recording"){ rec.stop(); return; }
+  if (!navigator.mediaDevices || !window.MediaRecorder){
+    errSfx(); toast("NO AUDIO INPUT"); return;
+  }
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+    recChunks = [];
+    rec = new MediaRecorder(stream);
+    rec.ondataavailable = e => { if (e.data.size) recChunks.push(e.data); };
+    rec.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      clearInterval(recTimer);
+      const blob = new Blob(recChunks, {type: rec.mimeType || "audio/mp4"});
+      rec = null;
+      if (blob.size < 400){ toast("TOO SHORT"); render(); return; }
+      await saveMedia({id:uid(), kind:"audio", title:"MEMO "+fmtStamp(Date.now()),
+        body:"", blob:blob, mime:blob.type, created:Date.now()});
+      okSfx(); toast("MEMO STORED"); render();
+    };
+    rec.start();
+    render();
+    recTimer = setInterval(() => {
+      const el = document.getElementById("recLabel");
+      if (el) setBmp(el, Math.random() < .5 ? "STOP  REC" : "STOP", 1.9, "lite");
+    }, 500);
+  }catch(e){ errSfx(); toast("MIC DENIED"); }
+}
+
+SCREENS.media = {
+  free:true,
+  title:() => "MEDIA",
+  back:true,
+  draw(sheet){
+    freeUrls();
+    const wrap = h("div",{class:"pad stack"});
+
+    wrap.appendChild(bigButton("NEW NOTE", () => go("note","new"), true));
+    wrap.appendChild(bigButton("CAPTURE PHOTO", () => {
+      pickFile("image/*", true, async f => {
+        await saveMedia({id:uid(), kind:"photo", title:"CAPTURE "+fmtStamp(Date.now()),
+          body:"", blob:f, mime:f.type, created:Date.now()});
+        okSfx(); toast("CAPTURE STORED"); render();
+      });
+    }));
+    const recording = !!(rec && rec.state === "recording");
+    const recBtn = h("button",{class:"card tap", type:"button",
+      style:"display:flex;justify-content:center"+(recording?";background:var(--c-ink)":""),
+      onclick:()=>{ tapFx(); toggleRecord(); }},
+      h("span",{id:"recLabel"}, bmp(recording ? "STOP  REC" : "VOICE MEMO", 1.9, recording?"lite":"ink")));
+    wrap.appendChild(recBtn);
+
+    if (!S.media.length){
+      wrap.appendChild(emptyState("NO FILES","NOTES, CAPTURES AND MEMOS"));
+    } else {
+      wrap.appendChild(sectionLabel("FILES  "+S.media.length));
+      S.media.slice().sort((a,b)=>b.created-a.created).forEach(m => wrap.appendChild(mediaCard(m)));
+    }
+    sheet.appendChild(wrap);
+  }
+};
+
+let noteDraft = null;
+SCREENS.note = {
+  free:true,
+  title:() => "NOTE",
+  back:"media",
+  draw(sheet){
+    if (!noteDraft){
+      const found = S.arg === "new" ? null : S.media.find(m => m.id === S.arg);
+      noteDraft = found ? Object.assign({}, found)
+                        : {id:uid(), kind:"text", title:"", body:"", created:Date.now()};
+    }
+    const d = noteDraft;
+    const wrap = h("div",{class:"pad stack"});
+    const t = h("input",{class:"inp", type:"text", value:d.title, placeholder:"Title",
+      oninput:e => d.title = e.target.value});
+    const b = h("textarea",{class:"inp", placeholder:"Body", style:"min-height:calc(var(--u)*150)",
+      oninput:e => d.body = e.target.value});
+    b.value = d.body;
+    wrap.appendChild(h("label",{class:"fld"}, bmp("TITLE",1.5,"lite"), t));
+    wrap.appendChild(h("label",{class:"fld"}, bmp("BODY",1.5,"lite"), b));
+    wrap.appendChild(bigButton("SAVE", async () => {
+      if (!d.title.trim() && !d.body.trim()){ errSfx(); toast("EMPTY"); return; }
+      await saveMedia(Object.assign({}, d));
+      noteDraft = null; okSfx(); toast("STORED"); go("media");
+    }, true));
+    sheet.appendChild(wrap);
+  }
+};
+
+/* =============================================================
+   HARDWARE - unit configuration and diagnostics
+   ============================================================= */
+SCREENS.hardware = {
+  free:true,
+  title:() => "HARDWARE",
+  back:true,
+  draw(sheet){
+    const wrap = h("div",{class:"pad stack"});
+
+    wrap.appendChild(sectionLabel("DISPLAY"));
+    wrap.appendChild(h("label",{class:"fld"}, bmp("ASPECT",1.5,"lite"),
+      segment([["square","SQUARE 1:1"],["fit","FIT SCREEN"]], S.cfg.view, async v => {
+        S.cfg.view = v; await saveCfg(); layout(); render();
+      }, 1.6)));
+
+    const bl = h("input",{type:"range", min:"55", max:"125", value:String(S.cfg.backlight),
+      style:"width:100%;accent-color:#000",
+      oninput:e => { S.cfg.backlight = +e.target.value;
+        document.documentElement.style.setProperty("--bl", S.cfg.backlight/100); },
+      onchange:() => saveCfg()});
+    wrap.appendChild(h("label",{class:"fld"}, bmp("BACKLIGHT",1.5,"lite"), h("div",{class:"card"}, bl)));
+
+    wrap.appendChild(toggleRow("SCANLINES", S.cfg.scan, async v => {
+      S.cfg.scan = v; document.body.classList.toggle("noscan", !v); await saveCfg(); render();
+    }));
+
+    wrap.appendChild(sectionLabel("STARTUP"));
+    wrap.appendChild(toggleRow("BOOT SEQUENCE", S.cfg.boot, async v => {
+      S.cfg.boot = v; await saveCfg(); render();
+    }));
+    wrap.appendChild(bigButton("REPLAY BOOT", () => {
+      bootDone = false;
+      const boot = $("#boot");
+      boot.style.display = ""; boot.classList.remove("gone");
+      $("#pda").classList.add("booting");
+      noiseFrames = [];
+      sizeBootCanvas();
+      bootStart = performance.now();
+      bootRAF = requestAnimationFrame(bootFrame);
+      boot.addEventListener("click", endBoot, {once:true});
+    }));
+
+    wrap.appendChild(sectionLabel("FEEDBACK"));
+    wrap.appendChild(toggleRow("SOUND", S.cfg.sound, async v => { S.cfg.sound=v; await saveCfg(); render(); if(v) okSfx(); }));
+    wrap.appendChild(toggleRow("HAPTIC", S.cfg.haptic, async v => { S.cfg.haptic=v; await saveCfg(); render(); if(v) haptic(); }));
+
+    wrap.appendChild(sectionLabel("ALERTS"));
+    wrap.appendChild(bigButton(notifyLabel(), requestNotify));
+    wrap.appendChild(h("div",{class:"card flat"},
+      h("div",{class:"note", style:"margin:0", text:
+        "iOS only delivers these while the unit is open on screen - a "
+      + "backgrounded web app has its clock frozen by the system. For an "
+      + "alarm that fires with the app closed, open a task and use ADD TO "
+      + "CALENDAR; iOS Calendar then owns the reminder."})));
+
+    wrap.appendChild(sectionLabel("DATA"));
+    wrap.appendChild(bigButton("EXPORT BACKUP", () => doExport()));
+    wrap.appendChild(bigButton("IMPORT BACKUP", () => {
+      pickFile("application/json,.json", false, async f => {
+        try{
+          const txt = await f.text();
+          await applyImport(JSON.parse(txt));
+        }catch(e){ errSfx(); toast("BAD FILE"); }
+      });
+    }));
+    wrap.appendChild(bigButton("ERASE ALL DATA", () => {
+      confirmBox("ERASE UNIT?", "Every task, note and capture will be destroyed. This cannot be undone.", "ERASE", async () => {
+        await idbClear("tasks"); await idbClear("media");
+        S.tasks = []; S.media = [];
+        errSfx(); toast("UNIT WIPED"); go("home");
+      });
+    }));
+
+    wrap.appendChild(sectionLabel("DIAGNOSTICS"));
+    const diag = h("div",{class:"card", style:"display:flex;flex-direction:column;gap:calc(var(--u)*5)"});
+    wrap.appendChild(diag);
+    diagLines().forEach(([k,v]) => {
+      diag.appendChild(h("div",{style:"display:flex;justify-content:space-between;gap:calc(var(--u)*8)"},
+        bmp(k, 1.3, "ink2"), bmp(v, 1.3)));
+    });
+    navigator.storage && navigator.storage.estimate && navigator.storage.estimate().then(e => {
+      diag.appendChild(h("div",{style:"display:flex;justify-content:space-between;gap:calc(var(--u)*8)"},
+        bmp("STORAGE USED", 1.3, "ink2"), bmp(bytes(e.usage||0), 1.3)));
+      repaintAllBmp(diag);
+    });
+
+    sheet.appendChild(wrap);
+  }
+};
+function toggleRow(label, on, fn){
+  return h("button",{class:"card tap", type:"button",
+    style:"display:flex;align-items:center;justify-content:space-between;gap:calc(var(--u)*8)",
+    onclick:()=>{ tapFx(); fn(!on); }},
+    bmp(label, 1.7),
+    h("span",{class:"seg", style:"flex:0 0 calc(var(--u)*104)"},
+      h("span",{class:"tick"+(on?" on":""), style:"pointer-events:none;margin:calc(var(--u)*4)"}),
+      h("span",{style:"display:flex;align-items:center;padding-right:calc(var(--u)*8)"}, bmp(on?"ON":"OFF",1.5))));
+}
+/* ---------- due watcher ---------------------------------------
+   Honest scope: this fires only while the unit is on screen. iOS
+   freezes page timers the moment the app is backgrounded, so a
+   local-only app cannot wake itself - that is what the calendar
+   hand-off in icsFor() is for.                                  */
+const alerted = new Set();
+const NOTIFY_OK = () => typeof Notification !== "undefined";
+
+function notifyLabel(){
+  if (!NOTIFY_OK()) return "ALERTS UNSUPPORTED";
+  if (Notification.permission === "granted") return "ALERTS ARMED";
+  if (Notification.permission === "denied")  return "ALERTS BLOCKED";
+  return "ARM ALERTS";
+}
+async function requestNotify(){
+  if (!NOTIFY_OK()){ errSfx(); toast("NOT SUPPORTED HERE"); return; }
+  if (Notification.permission === "granted"){ toast("ALREADY ARMED"); return; }
+  try{
+    const r = await Notification.requestPermission();
+    if (r === "granted"){ okSfx(); toast("ALERTS ARMED"); } else { errSfx(); toast("PERMISSION REFUSED"); }
+  }catch(e){ errSfx(); toast("REQUEST FAILED"); }
+  render();
+}
+function fireAlert(t){
+  beep(740, 90, "square", .06);
+  setTimeout(() => beep(560, 140, "square", .06), 110);
+  haptic();
+  toast("DUE: " + t.title);
+  if (NOTIFY_OK() && Notification.permission === "granted"){
+    try{ new Notification("C.A.T. PDA", {body:t.title, icon:"icon-192.png", tag:t.id}); }catch(e){}
+  }
+}
+function checkDue(){
+  if (!S.ready || document.visibilityState !== "visible") return;
+  const now = Date.now();
+  let hit = false;
+  open_().forEach(t => {
+    if (!t.due || t.due > now || alerted.has(t.id)) return;
+    alerted.add(t.id);
+    /* anything already an hour stale was due before this session
+       started - record it, but do not shout */
+    if (now - t.due <= 3600000){ fireAlert(t); hit = true; }
+  });
+  if (hit){ paintFooter(); if (S.screen === "home" || S.screen === "tasks") render(); }
+}
+
+function diagLines(){
+  return [
+    ["FIRMWARE",  "V"+APP_VER],
+    ["ROM BUILD", BUILD],
+    ["SHELL",     isStandalone() ? "STANDALONE" : "BROWSER"],
+    ["PANEL",     Math.round($("#pda").clientWidth)+"X"+Math.round($("#pda").clientHeight)],
+    ["SCREEN",    screen.width+"X"+screen.height],
+    ["UNIT",      U.toFixed(3)],
+    ["PERSIST",   S.cfg.installed ? "GRANTED" : "BEST EFFORT"],
+    ["ALERTS",    NOTIFY_OK() ? Notification.permission.toUpperCase() : "N/A"],
+    ["RECORDS",   String(S.tasks.length + S.media.length)]
+  ];
+}
+
+/* ---------- backup ------------------------------------------- */
+function blobToDataURL(b){
+  return new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(b); });
+}
+function dataURLToBlob(u){
+  const [head, b64] = String(u).split(",");
+  const mime = (head.match(/:(.*?);/) || [,"application/octet-stream"])[1];
+  const bin = atob(b64), arr = new Uint8Array(bin.length);
+  for (let i=0;i<bin.length;i++) arr[i] = bin.charCodeAt(i);
+  return new Blob([arr], {type:mime});
+}
+async function buildExportData(){
+  const media = [];
+  for (const m of S.media){
+    const c = Object.assign({}, m);
+    if (c.blob){ c.data = await blobToDataURL(c.blob); delete c.blob; }
+    media.push(c);
+  }
+  return {app:"cat-pda", v:APP_VER, exported:Date.now(), cfg:S.cfg, tasks:S.tasks, media:media};
+}
+async function doExport(){
+  toast("PACKING...");
+  const data = await buildExportData();
+  const d = new Date();
+  download("cat-pda-"+d.getFullYear()+pad2(d.getMonth()+1)+pad2(d.getDate())+".json",
+           JSON.stringify(data), "application/json");
+  S.cfg.lastSave = Date.now();
+  await saveCfg(); paintFooter();
+  okSfx(); toast("BACKUP OUT");
+}
+async function applyImport(data){
+  if (!data || data.app !== "cat-pda") { errSfx(); toast("NOT A PDA BACKUP"); return; }
+  const tasks = (data.tasks||[]).map(norm);
+  const media = (data.media||[]).map(m => {
+    const c = Object.assign({}, m);
+    if (c.data){ c.blob = dataURLToBlob(c.data); delete c.data; }
+    return c;
+  });
+  const byId = new Map(S.tasks.map(t => [t.id, t]));
+  tasks.forEach(t => byId.set(t.id, t));
+  S.tasks = [...byId.values()];
+  const mById = new Map(S.media.map(m => [m.id, m]));
+  media.forEach(m => mById.set(m.id, m));
+  S.media = [...mById.values()];
+  await idbBulk("tasks", S.tasks);
+  await idbBulk("media", S.media);
+  okSfx(); toast("MERGED "+tasks.length+"+"+media.length);
+  render();
+}
+
+/* =============================================================
+   FOOTER
+   ============================================================= */
+async function saveCfg(){ await idbPut("kv", S.cfg); }
+async function touchSave(){ paintFooter(); }
+
+function paintFooter(){
+  if ($("#foot").hidden) return;
+  setBmp($("#saveWord"), "SAVE DATA", 2.1);
+  const sub = $("#saveSub");
+  sub.textContent = "";
+  sub.appendChild(bmp("CLICK TO",   1.0, "ink2"));
+  sub.appendChild(bmp("STORE DATA", 1.0, "ink2"));
+
+  const overdue = open_().filter(t => t.due && t.due < Date.now()).length;
+  setBmp($("#f1"), "TSK "+open_().length, 1.1);
+  setBmp($("#f2"), "DUE "+overdue, 1.1);
+  setBmp($("#f3"), "MED "+S.media.length, 1.1);
+  setBmp($("#f4"), "FIN "+S.tasks.filter(t=>t.done).length, 1.1);
+  setBmp($("#f5"), "LAST STORE " + (S.cfg.lastSave ? fmtStamp(S.cfg.lastSave) : "NULL"), 1.0, "ink2");
+  setBmp($("#cop1"), "C.A.T. PERSONAL DATA ASSISTANT VERSION "+BUILD, 0.92, "ink2");
+  setBmp($("#cop2"), "COPYRIGHT 1996-1997 JOUST ELECTRONICS", 0.92, "ink2");
+  setBmp($("#logo"), "JOUST.", 2.1);
+}
+
+/* =============================================================
+   INIT
+   ============================================================= */
+async function boot(){
+  try{
+    db = await openDB();
+  }catch(e){
+    document.body.innerHTML = "";
+    const p = h("div",{style:"padding:24px;color:#fff;font:14px/1.5 monospace"},
+      "STORAGE FAULT: "+e.message+"\n\nClose other tabs running this app and reload.");
+    document.body.appendChild(p);
+    return;
+  }
+
+  const kv = await idbAll("kv");
+  const saved = kv.find(k => k.id === "cfg");
+  if (saved) Object.assign(S.cfg, saved);
+  S.tasks = (await idbAll("tasks")).map(norm);
+  S.media = await idbAll("media");
+
+  document.body.classList.toggle("noscan", !S.cfg.scan);
+  document.documentElement.style.setProperty("--bl", S.cfg.backlight/100);
+  readPalette();
+
+  /* ask the browser to keep this data through storage pressure */
+  if (navigator.storage && navigator.storage.persist && !S.cfg.installed){
+    try{
+      const granted = await navigator.storage.persist();
+      if (granted){ S.cfg.installed = Date.now(); await saveCfg(); }
+    }catch(e){}
+  }
+
+  S.ready = true;
+  fixShell();
+  render();
+  runBoot();
+
+  /* the healer runs on a timer: resize/orientationchange are not
+     reliable in standalone (see ios-navbar-fix) */
+  setInterval(fixShell, 1000);
+  window.addEventListener("resize", fixShell);
+  window.addEventListener("orientationchange", () => setTimeout(fixShell, 260));
+  if (window.visualViewport) window.visualViewport.addEventListener("resize", fixShell);
+
+  /* iOS pans the page for the keyboard and can leave it panned */
+  document.addEventListener("focusin", e => {
+    if (!/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+    setTimeout(() => e.target.scrollIntoView({block:"center", behavior:"smooth"}), 220);
+  });
+  document.addEventListener("focusout", () => {
+    setTimeout(() => { window.scrollTo(0,0); fixShell(); }, 80);
+  });
+
+  $("#saveBtn").addEventListener("click", async () => {
+    tapFx();
+    const lamp = $("#saveBtn");
+    lamp.classList.add("on");
+    setTimeout(() => lamp.classList.remove("on"), 700);
+    await doExport();
+  });
+  $("#modal").addEventListener("click", e => { if (e.target.id === "modal" && modalCb) modalCb(false); });
+
+  /* overdue notice on resume */
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible"){
+      fixShell(); checkDue();
+      if (S.screen === "home" || S.screen === "tasks") render();
+    }
+  });
+  checkDue();
+  setInterval(checkDue, 30000);
+
+  if ("serviceWorker" in navigator){
+    navigator.serviceWorker.register("sw.js").catch(()=>{});
+  }
+}
+
+/* debug handle - every automated check runs through this.
+   bootAt(ms) paints one deterministic boot frame so the sequence
+   can be inspected without racing the animation. */
+window.__pda = {S, go, render, layout, fixShell, buildExportData, applyImport,
+                saveTask, deleteTask, norm, uid, bmpCells, icsFor, endBoot,
+                rollForward, bucket, advance, checkDue, alerted,
+  bootAt(t){
+    cancelAnimationFrame(bootRAF);
+    bootDone = false;
+    const boot = $("#boot");
+    boot.style.display = ""; boot.classList.remove("gone");
+    $("#pda").classList.add("booting");
+    sizeBootCanvas();
+    const cv = $("#bootc"), ctx = cv.getContext("2d"), w = cv.width, ht = cv.height;
+    if (t < T_STATIC) drawStatic(ctx, w, ht, t);
+    else if (t < T_STATIC+T_WIPE){
+      const k = (t-T_STATIC)/T_WIPE;
+      drawStatic(ctx, w, ht, t);
+      ctx.save(); ctx.globalAlpha = k; ctx.fillStyle = "#000000";
+      ctx.fillRect(0,0,w,ht); ctx.restore();
+    }
+    else drawJoust(ctx, w, ht, 1);
+    return {t, phase: t < T_STATIC ? "static" : t < T_STATIC+T_WIPE ? "wipe" : "joust"};
+  },
+  timings:{T_STATIC, T_WIPE, T_JOUST, T_OUT, T_TOTAL}};
+
+boot();
+</script>
+</body>
+</html>
